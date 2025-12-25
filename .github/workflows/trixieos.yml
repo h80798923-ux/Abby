@@ -70,7 +70,7 @@ jobs:
 
         rc-update add dbus default
         rc-update add elogind default
-        rc-update add udev defaul
+        rc-update add udev default
         rc-update add lightdm default
         EOF
 
