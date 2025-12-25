@@ -10,88 +10,98 @@ jobs:
     steps:
     - uses: actions/checkout@v4
 
-    - name: Install host dependencies
+    - name: Host dependencies
       run: |
         sudo apt update
         sudo apt install -y \
-          build-essential bc bison flex libncurses-dev \
-          libssl-dev libelf-dev dwarves \
-          grub-pc-bin grub-common xorriso \
-          wget tar xz-utils cpio rsync
+          build-essential libncurses-dev libssl-dev libelf-dev \
+          grub-pc-bin grub-common xorriso wget tar xz-utils rsync
 
-    - name: Create Alpine rootfs
+    - name: Extract Alpine rootfs
       run: |
         mkdir -p work/rootfs
-        sudo wget https://dl-cdn.alpinelinux.org/alpine/v3.19/releases/x86_64/alpine-minirootfs-3.19.1-x86_64.tar.gz
+        wget https://dl-cdn.alpinelinux.org/alpine/v3.19/releases/x86_64/alpine-minirootfs-3.19.1-x86_64.tar.gz
         sudo tar -xzf alpine-minirootfs-3.19.1-x86_64.tar.gz -C work/rootfs
 
-    - name: Configure apk repositories
+    - name: Setup networking for chroot (CRITICAL)
+      run: |
+        sudo cp /etc/resolv.conf work/rootfs/etc/resolv.conf
+
+    - name: Setup apk repos
       run: |
         sudo tee work/rootfs/etc/apk/repositories <<EOF
-        https://dl-cdn.alpinelinux.org/alpine/v3.19/main
-        https://dl-cdn.alpinelinux.org/alpine/v3.19/community
-        EOF
+https://dl-cdn.alpinelinux.org/alpine/v3.19/main
+https://dl-cdn.alpinelinux.org/alpine/v3.19/community
+EOF
 
     - name: Mount system dirs
       run: |
         sudo mount --bind /dev work/rootfs/dev
-        sudo mount --bind /sys work/rootfs/sys
         sudo mount --bind /proc work/rootfs/proc
+        sudo mount --bind /sys work/rootfs/sys
 
-    - name: Install base system + XFCE4
+    - name: Install base + XFCE
       run: |
         sudo chroot work/rootfs /bin/sh <<'EOF'
         apk update
-        apk add alpine-base openrc elogind dbus \
-          xfce4 xfce4-terminal xfce4-session \
-          lightdm lightdm-gtk-greeter \
-          mesa-dri-gallium \
-          xorg-server xf86-video-vesa \
-          sudo nano bash
+        apk add \
+          alpine-base \
+          openrc \
+          dbus \
+          elogind \
+          sudo \
+          bash \
+          nano \
+          xfce4 \
+          xfce4-terminal \
+          xfce4-session \
+          xorg-server \
+          xf86-video-vesa \
+          lightdm \
+          lightdm-gtk-greeter \
+          mesa-dri-gallium
         rc-update add dbus
         rc-update add elogind
         rc-update add lightdm
         EOF
 
-    - name: Create user trixieuser
+    - name: Create user
       run: |
         sudo chroot work/rootfs /bin/sh <<'EOF'
         adduser -D trixieuser
         echo "trixieuser ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
         EOF
 
-    - name: Build Linux kernel
+    - name: Build kernel
       run: |
         wget https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.6.8.tar.xz
         tar -xf linux-6.6.8.tar.xz
         cd linux-6.6.8
         make defconfig
         make -j$(nproc)
-        cd ..
+        sudo mkdir -p ../work/rootfs/boot
+        sudo cp arch/x86/boot/bzImage ../work/rootfs/boot/vmlinuz
 
-        sudo mkdir -p work/rootfs/boot
-        sudo cp linux-6.6.8/arch/x86/boot/bzImage work/rootfs/boot/vmlinuz
-
-    - name: Create init script (auto GUI)
+    - name: Auto-login + GUI
       run: |
         sudo tee work/rootfs/etc/inittab <<EOF
-        ::sysinit:/sbin/openrc sysinit
-        ::sysinit:/sbin/openrc boot
-        ::wait:/sbin/openrc default
-        tty1::respawn:/sbin/agetty --autologin trixieuser tty1
-        EOF
+::sysinit:/sbin/openrc sysinit
+::sysinit:/sbin/openrc boot
+::wait:/sbin/openrc default
+tty1::respawn:/sbin/agetty --autologin trixieuser tty1
+EOF
 
-    - name: Create ISO
+    - name: Build ISO
       run: |
         mkdir -p iso/boot/grub
         cp work/rootfs/boot/vmlinuz iso/boot/vmlinuz
 
         cat <<EOF > iso/boot/grub/grub.cfg
-        set timeout=3
-        menuentry "TrixieOS XFCE" {
-          linux /boot/vmlinuz root=/dev/ram0 rw
-        }
-        EOF
+set timeout=3
+menuentry "TrixieOS XFCE" {
+  linux /boot/vmlinuz rw
+}
+EOF
 
         grub-mkrescue -o TrixieOS.iso iso
 
