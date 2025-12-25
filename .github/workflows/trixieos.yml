@@ -53,7 +53,6 @@ jobs:
           linux-firmware
 
         rc-update add dbus default
-        rc-update add NetworkManager default
         rc-update add lightdm default
 
         adduser -D trixieuser
