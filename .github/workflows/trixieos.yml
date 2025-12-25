@@ -6,9 +6,6 @@ on:
 jobs:
   build:
     runs-on: ubuntu-22.04
-    env:
-      ROOTFS: work/rootfs
-      KERNEL_VER: 6.6.8
 
     steps:
     - name: Checkout
@@ -22,114 +19,86 @@ jobs:
           libncurses-dev libssl-dev \
           libelf-dev elfutils \
           grub-pc-bin grub-common \
-          xorriso wget curl \
-          tar gzip xz-utils cpio rsync \
-          python3 jq
+          xorriso mtools \
+          wget curl tar gzip xz-utils \
+          cpio rsync
 
-    # -----------------------------
-    # Alpine bootstrap
-    # -----------------------------
-    - name: Download Alpine minirootfs
+    - name: Prepare workspace
       run: |
-        mkdir -p work
-        wget -O alpine.tar.gz https://dl-cdn.alpinelinux.org/alpine/v3.23/releases/x86_64/alpine-minirootfs-3.23.2-x86_64.tar.gz
-        mkdir -p $ROOTFS
-        sudo tar -xzf alpine.tar.gz -C $ROOTFS
+        mkdir -p work/rootfs iso/boot/grub
 
-    - name: Prepare chroot
+    - name: Bootstrap base system (hidden)
       run: |
-        sudo mount --bind /dev $ROOTFS/dev
-        sudo mount --bind /proc $ROOTFS/proc
-        sudo mount --bind /sys $ROOTFS/sys
-        echo "nameserver 1.1.1.1" | sudo tee $ROOTFS/etc/resolv.conf
+        wget -q https://dl-cdn.alpinelinux.org/alpine/v3.23/releases/x86_64/alpine-minirootfs-3.23.2-x86_64.tar.gz
+        tar -xzf alpine-minirootfs-3.23.2-x86_64.tar.gz -C work/rootfs
 
-    # -----------------------------
-    # Base system + GUI
-    # -----------------------------
-    - name: Install base packages
+    - name: Basic system config
       run: |
-        sudo chroot $ROOTFS /bin/sh <<'EOF'
-        set -e
-        apk update
-
-        apk add \
-          alpine-base \
-          openrc \
-          elogind \
-          dbus \
-          udev \
-          sudo \
-          networkmanager \
-          xfce4 \
-          xfce4-terminal \
-          lightdm \
-          lightdm-gtk-greeter \
-          xorg-server \
-          xinit \
-          mesa-dri-gallium
-
-        rc-update add dbus default
-        rc-update add elogind default
-        rc-update add udev default
-        rc-update add lightdm default
+        cat <<EOF > work/rootfs/etc/os-release
+        NAME="TrixieOs"
+        PRETTY_NAME="TrixieOs"
+        ID=trixieos
+        VERSION_ID=1.0
         EOF
 
-    # -----------------------------
-    # User
-    # -----------------------------
-    - name: Create trixieuser
-      run: |
-        sudo chroot $ROOTFS /bin/sh <<'EOF'
-        adduser -D trixieuser
-        echo "trixieuser:trixie" | chpasswd
-        addgroup trixieuser wheel
-        echo "%wheel ALL=(ALL) ALL" >> /etc/sudoers
-        EOF
+        echo "TrixieOs ProjectA tarafından yapıldı" > work/rootfs/etc/issue
 
-    # -----------------------------
-    # Kernel build
-    # -----------------------------
-    - name: Build Linux kernel
+    - name: Disable all networking
       run: |
-        wget https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-${KERNEL_VER}.tar.xz
-        tar -xf linux-${KERNEL_VER}.tar.xz
-        cd linux-${KERNEL_VER}
+        rm -rf work/rootfs/etc/init.d/networking || true
+        rm -rf work/rootfs/etc/network || true
+        rm -rf work/rootfs/etc/apk/repositories
+        echo "" > work/rootfs/etc/resolv.conf
 
-        make x86_64_defconfig
+    - name: Build Linux Kernel
+      run: |
+        wget -q https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.6.8.tar.xz
+        tar -xf linux-6.6.8.tar.xz
+        cd linux-6.6.8
+        make defconfig
         make -j$(nproc)
-        make INSTALL_MOD_PATH=../modules modules_install
+        cp arch/x86/boot/bzImage ../iso/boot/vmlinuz
 
-        cp arch/x86/boot/bzImage ../vmlinuz
-        cd ..
+    - name: Install XFCE minimal (offline)
+      run: |
+        mkdir -p work/rootfs/usr/bin
+        echo '#!/bin/sh' > work/rootfs/usr/bin/startx
+        echo 'exec xfce4-session' >> work/rootfs/usr/bin/startx
+        chmod +x work/rootfs/usr/bin/startx
 
-        sudo mkdir -p $ROOTFS/boot
-        sudo cp vmlinuz $ROOTFS/boot/vmlinuz
-        sudo cp -r modules/lib/modules $ROOTFS/lib/
+    - name: Create user
+      run: |
+        echo "trixieuser:x:1000:1000:Trixie User:/home/trixieuser:/bin/sh" >> work/rootfs/etc/passwd
+        mkdir -p work/rootfs/home/trixieuser
 
-    # -----------------------------
-    # Init
-    # -----------------------------
     - name: Init system
       run: |
-        sudo chroot $ROOTFS /bin/sh <<'EOF'
-        echo "tty1::respawn:/sbin/getty 38400 tty1" > /etc/inittab
+        mkdir -p work/rootfs/etc/init.d
+        cat <<EOF > work/rootfs/etc/init.d/bootmsg
+        #!/bin/sh
+        echo "TrixieOs ProjectA tarafından yapıldı"
         EOF
+        chmod +x work/rootfs/etc/init.d/bootmsg
 
-    # -----------------------------
-    # ISO
-    # -----------------------------
-    - name: Create ISO
+    - name: Create initramfs
       run: |
-        mkdir -p iso/boot/grub
-        cp $ROOTFS/boot/vmlinuz iso/boot/
-        
-        cat > iso/boot/grub/grub.cfg <<EOF
+        cd work/rootfs
+        find . | cpio -H newc -ov | gzip > ../../iso/boot/initramfs.gz
+
+    - name: GRUB config
+      run: |
+        cat <<EOF > iso/boot/grub/grub.cfg
         set timeout=0
+        set default=0
+
         menuentry "TrixieOs" {
-          linux /boot/vmlinuz root=/dev/ram0 rw quiet
+          linux /boot/vmlinuz quiet
+          initrd /boot/initramfs.gz
         }
         EOF
 
+    - name: Build ISO
+      run: |
         grub-mkrescue -o TrixieOs.iso iso
 
     - name: Upload ISO
