@@ -8,117 +8,101 @@ jobs:
     runs-on: ubuntu-22.04
 
     steps:
-    - name: Checkout
-      uses: actions/checkout@v4
+    - uses: actions/checkout@v4
 
-    - name: Install build dependencies
+    - name: Host dependencies
       run: |
         sudo apt update
         sudo apt install -y \
-          build-essential bc bison flex \
-          libncurses-dev libssl-dev libelf-dev \
-          grub-pc-bin grub-common \
-          mtools xorriso \
-          wget curl rsync \
-          squashfs-tools \
-          qemu-utils
+          build-essential libncurses-dev libssl-dev libelf-dev \
+          grub-pc-bin grub-common xorriso wget tar xz-utils rsync
 
-    - name: Prepare directories
+    - name: Extract Alpine rootfs
       run: |
-        mkdir -p work/rootfs iso/boot/grub
+        mkdir -p work/rootfs
+        wget https://dl-cdn.alpinelinux.org/alpine/v3.19/releases/x86_64/alpine-minirootfs-3.19.1-x86_64.tar.gz
+        sudo tar -xzf alpine-minirootfs-3.19.1-x86_64.tar.gz -C work/rootfs
 
-    - name: Alpine bootstrap
+    - name: Setup networking for chroot (CRITICAL)
       run: |
-        wget -q https://dl-cdn.alpinelinux.org/alpine/v3.23/releases/x86_64/alpine-minirootfs-3.23.2-x86_64.tar.gz
-        sudo tar -xzf alpine-minirootfs-3.23.2-x86_64.tar.gz -C work/rootfs
+        sudo cp /etc/resolv.conf work/rootfs/etc/resolv.conf
+
+    - name: Setup apk repos
+      run: |
+        sudo tee work/rootfs/etc/apk/repositories <<EOF
+https://dl-cdn.alpinelinux.org/alpine/v3.19/main
+https://dl-cdn.alpinelinux.org/alpine/v3.19/community
+EOF
 
     - name: Mount system dirs
       run: |
         sudo mount --bind /dev work/rootfs/dev
-        sudo mount -t proc proc work/rootfs/proc
-        sudo mount -t sysfs sysfs work/rootfs/sys
+        sudo mount --bind /proc work/rootfs/proc
+        sudo mount --bind /sys work/rootfs/sys
 
-    - name: Configure Alpine base + XFCE
+    - name: Install base + XFCE
       run: |
         sudo chroot work/rootfs /bin/sh <<'EOF'
-        set -e
-
-        echo "https://dl-cdn.alpinelinux.org/alpine/v3.23/main" > /etc/apk/repositories
-        echo "https://dl-cdn.alpinelinux.org/alpine/v3.23/community" >> /etc/apk/repositories
-
         apk update
-
-        apk add --no-cache \
+        apk add \
           alpine-base \
           openrc \
           dbus \
-          bash \
-          sudo \
           elogind \
-          xorg-server \
-          xinit \
+          sudo \
+          bash \
+          nano \
           xfce4 \
           xfce4-terminal \
           xfce4-session \
-          xfce4-panel \
-          xfce4-settings \
-          xfwm4 \
-          thunar \
+          xorg-server \
+          xf86-video-vesa \
           lightdm \
           lightdm-gtk-greeter \
-          gtk+3.0-base \
-          python3 \
-          py3-gobject \
-          py3-requests
-
-        rc-update add dbus default
-        rc-update add elogind default
-        rc-update add lightdm default
-
-        adduser -D trixieuser
-        echo "trixieuser:trixie" | chpasswd
-        addgroup trixieuser wheel
-        echo "%wheel ALL=(ALL) ALL" >> /etc/sudoers
-
-        echo "exec startxfce4" > /home/trixieuser/.xinitrc
-        chown trixieuser:trixieuser /home/trixieuser/.xinitrc
-
-        ln -s /etc/init.d/lightdm /etc/init.d/display-manager
-
+          mesa-dri-gallium
+        rc-update add dbus
+        rc-update add elogind
+        rc-update add lightdm
         EOF
 
-    - name: Build Linux kernel 6.6
+    - name: Create user
       run: |
-        wget -q https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.6.8.tar.xz
+        sudo chroot work/rootfs /bin/sh <<'EOF'
+        adduser -D trixieuser
+        echo "trixieuser ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
+        EOF
+
+    - name: Build kernel
+      run: |
+        wget https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.6.8.tar.xz
         tar -xf linux-6.6.8.tar.xz
         cd linux-6.6.8
         make defconfig
         make -j$(nproc)
-        make modules_install INSTALL_MOD_PATH=../work/rootfs
-        cp arch/x86/boot/bzImage ../iso/boot/vmlinuz
+        sudo mkdir -p ../work/rootfs/boot
+        sudo cp arch/x86/boot/bzImage ../work/rootfs/boot/vmlinuz
 
-    - name: Create initramfs
+    - name: Auto-login + GUI
       run: |
-        sudo chroot work/rootfs /bin/sh <<'EOF'
-        apk add --no-cache mkinitfs
-        mkinitfs -o /boot/initramfs
-        EOF
-        sudo cp work/rootfs/boot/initramfs iso/boot/initramfs
-
-    - name: GRUB config
-      run: |
-        cat > iso/boot/grub/grub.cfg <<'EOF'
-        set timeout=0
-        set default=0
-
-        menuentry "TrixieOS" {
-          linux /boot/vmlinuz quiet
-          initrd /boot/initramfs
-        }
-        EOF
+        sudo tee work/rootfs/etc/inittab <<EOF
+::sysinit:/sbin/openrc sysinit
+::sysinit:/sbin/openrc boot
+::wait:/sbin/openrc default
+tty1::respawn:/sbin/agetty --autologin trixieuser tty1
+EOF
 
     - name: Build ISO
       run: |
+        mkdir -p iso/boot/grub
+        cp work/rootfs/boot/vmlinuz iso/boot/vmlinuz
+
+        cat <<EOF > iso/boot/grub/grub.cfg
+set timeout=3
+menuentry "TrixieOS XFCE" {
+  linux /boot/vmlinuz rw
+}
+EOF
+
         grub-mkrescue -o TrixieOS.iso iso
 
     - name: Upload ISO
