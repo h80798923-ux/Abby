@@ -72,7 +72,8 @@ jobs:
           xfwm4 xfce4-panel xfce4-session xfce4-settings \
           xorg-server xinit dbus \
           lightdm lightdm-gtk-greeter \
-          sudo bash python3 py3-requests py3-gobject gtk+3.0
+          openrc \
+          sudo bash python3 py3-requests py3-gobject3 gtk+3 \
         rc-update add lightdm default
         EOF
 
