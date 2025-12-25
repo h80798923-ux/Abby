@@ -1,0 +1,131 @@
+name: Build TrixieOs ISO (USB2 Optimized)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    env:
+      ROOTFS: work/rootfs
+      ISO: work/iso
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Install build dependencies
+      run: |
+        sudo apt update
+        sudo apt install -y \
+          build-essential bc bison flex \
+          libncurses-dev libssl-dev libelf-dev \
+          grub-pc-bin grub-common xorriso mtools \
+          wget curl rsync squashfs-tools
+
+    # -----------------------------
+    # Alpine bootstrap (MINIMAL)
+    # -----------------------------
+    - name: Alpine bootstrap
+      run: |
+        mkdir -p work
+        wget https://dl-cdn.alpinelinux.org/alpine/v3.23/releases/x86_64/alpine-minirootfs-3.23.2-x86_64.tar.gz
+        mkdir -p $ROOTFS
+        sudo tar -xzf alpine-minirootfs-3.23.2-x86_64.tar.gz -C $ROOTFS
+
+        sudo tee $ROOTFS/etc/apk/repositories <<EOF
+https://dl-cdn.alpinelinux.org/alpine/v3.23/main
+https://dl-cdn.alpinelinux.org/alpine/v3.23/community
+EOF
+
+    # -----------------------------
+    # Base system + XFCE4
+    # -----------------------------
+    - name: Install base + XFCE4
+      run: |
+        sudo mount --bind /dev $ROOTFS/dev
+        sudo mount --bind /sys $ROOTFS/sys
+        sudo mount --bind /proc $ROOTFS/proc
+
+        sudo chroot $ROOTFS /bin/sh <<'EOF'
+        apk update
+        apk add \
+          openrc udev dbus elogind \
+          xorg-server xfce4 xfce4-terminal \
+          lightdm lightdm-gtk-greeter \
+          mesa-dri-gallium \
+          sudo bash ca-certificates \
+          python3 py3-requests py3-pip
+
+        rc-update add udev sysinit
+        rc-update add dbus
+        rc-update add elogind
+        rc-update add lightdm
+
+        adduser -D trixieuser
+        echo "trixieuser:trixie" | chpasswd
+        echo "trixieuser ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers
+
+        sed -i 's/^#greeter-session=.*/greeter-session=lightdm-gtk-greeter/' /etc/lightdm/lightdm.conf
+        sed -i 's/^#user-session=.*/user-session=xfce/' /etc/lightdm/lightdm.conf
+
+        echo "TrixieOs ProjectA tarafından yapıldı" > /etc/issue
+        echo "NAME=TrixieOs" > /etc/os-release
+        EOF
+
+        sudo umount $ROOTFS/dev
+        sudo umount $ROOTFS/sys
+        sudo umount $ROOTFS/proc
+
+    # -----------------------------
+    # Kernel build (USB 2 optimized)
+    # -----------------------------
+    - name: Build Linux kernel
+      run: |
+        wget https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.6.8.tar.xz
+        tar -xf linux-6.6.8.tar.xz
+        cd linux-6.6.8
+        make defconfig
+        scripts/config --disable DEBUG_KERNEL
+        scripts/config --disable DEBUG_INFO
+        make -j$(nproc)
+        sudo make INSTALL_MOD_PATH=../$ROOTFS modules_install
+        sudo cp arch/x86/boot/bzImage ../$ROOTFS/boot/vmlinuz
+
+    # -----------------------------
+    # Initramfs (simple)
+    # -----------------------------
+    - name: Create initramfs
+      run: |
+        cd $ROOTFS
+        sudo find . | sudo cpio -H newc -o | gzip > ../initramfs.gz
+
+    # -----------------------------
+    # ISO structure
+    # -----------------------------
+    - name: Prepare ISO
+      run: |
+        mkdir -p $ISO/boot/grub
+        cp $ROOTFS/boot/vmlinuz $ISO/boot/vmlinuz
+        cp work/initramfs.gz $ISO/boot/initramfs.gz
+
+        cat <<EOF > $ISO/boot/grub/grub.cfg
+set timeout=3
+menuentry "TrixieOs" {
+  linux /boot/vmlinuz quiet loglevel=3 rootdelay=5 noatime elevator=none
+  initrd /boot/initramfs.gz
+}
+EOF
+
+    # -----------------------------
+    # Build ISO
+    # -----------------------------
+    - name: Build ISO
+      run: |
+        grub-mkrescue -o TrixieOs.iso $ISO
+
+    - name: Upload ISO
+      uses: actions/upload-artifact@v4
+      with:
+        name: TrixieOs-ISO
+        path: TrixieOs.iso
