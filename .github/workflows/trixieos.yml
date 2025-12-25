@@ -1,4 +1,4 @@
-name: Build TrixieOs ISO
+name: Build TrixieOs ISO (Kernel + XFCE + TRX)
 
 on:
   workflow_dispatch:
@@ -8,101 +8,184 @@ jobs:
     runs-on: ubuntu-22.04
 
     steps:
-    - name: Checkout
-      uses: actions/checkout@v4
+    - uses: actions/checkout@v4
 
     - name: Install host dependencies
       run: |
         sudo apt update
         sudo apt install -y \
           build-essential bc bison flex \
-          libncurses-dev libssl-dev \
-          libelf-dev elfutils \
-          grub-pc-bin grub-common \
-          xorriso mtools \
-          wget curl tar gzip xz-utils \
-          cpio rsync
+          libssl-dev libncurses-dev \
+          libelf-dev dwarves \
+          wget xz-utils tar \
+          grub-pc-bin grub-efi-amd64-bin \
+          xorriso mtools squashfs-tools
 
-    - name: Prepare workspace
+    # =========================
+    # Kernel build
+    # =========================
+    - name: Build Linux kernel
       run: |
-        mkdir -p work/rootfs iso/boot/grub
+        wget https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.6.8.tar.xz
+        tar -xf linux-6.6.8.tar.xz
+        cd linux-6.6.8
+        make x86_64_defconfig
+        make -j$(nproc)
 
-    - name: Bootstrap base system (hidden)
+    # =========================
+    # Alpine bootstrap (hidden)
+    # =========================
+    - name: Bootstrap minimal system
       run: |
-        wget -q https://dl-cdn.alpinelinux.org/alpine/v3.23/releases/x86_64/alpine-minirootfs-3.23.2-x86_64.tar.gz
-        tar -xzf alpine-minirootfs-3.23.2-x86_64.tar.gz -C work/rootfs
+        mkdir -p work/rootfs
+        wget -O alpine.tar.gz https://dl-cdn.alpinelinux.org/alpine/v3.23/releases/x86_64/alpine-minirootfs-3.23.2-x86_64.tar.gz
+        sudo tar -xzf alpine.tar.gz -C work/rootfs
 
-    - name: Basic system config
+    - name: Prepare chroot
       run: |
-        cat <<EOF > work/rootfs/etc/os-release
+        sudo mount --bind /dev work/rootfs/dev
+        sudo mount -t proc none work/rootfs/proc
+        sudo mount -t sysfs none work/rootfs/sys
+        echo "nameserver 8.8.8.8" | sudo tee work/rootfs/etc/resolv.conf
+
+    # =========================
+    # System identity
+    # =========================
+    - name: Set TrixieOs identity
+      run: |
+        sudo tee work/rootfs/etc/os-release <<'EOF'
         NAME="TrixieOs"
         PRETTY_NAME="TrixieOs"
         ID=trixieos
-        VERSION_ID=1.0
+        VERSION="1.0"
         EOF
 
-        echo "TrixieOs ProjectA tarafından yapıldı" > work/rootfs/etc/issue
-
-    - name: Disable all networking
+    # =========================
+    # Install XFCE + LightDM
+    # =========================
+    - name: Install desktop environment
       run: |
-        rm -rf work/rootfs/etc/init.d/networking || true
-        rm -rf work/rootfs/etc/network || true
-        rm -rf work/rootfs/etc/apk/repositories
-        echo "" > work/rootfs/etc/resolv.conf
+        sudo chroot work/rootfs /bin/sh <<'EOF'
+        apk update
+        apk add --no-cache \
+          xfce4 xfce4-terminal thunar \
+          xfwm4 xfce4-panel xfce4-session xfce4-settings \
+          xorg-server xinit dbus \
+          lightdm lightdm-gtk-greeter \
+          sudo bash python3 py3-requests py3-gobject gtk+3.0
+        rc-update add lightdm default
+        EOF
 
-    - name: Build Linux Kernel
-      run: |
-        wget -q https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.6.8.tar.xz
-        tar -xf linux-6.6.8.tar.xz
-        cd linux-6.6.8
-        make defconfig
-        make -j$(nproc)
-        cp arch/x86/boot/bzImage ../iso/boot/vmlinuz
-
-    - name: Install XFCE minimal (offline)
-      run: |
-        mkdir -p work/rootfs/usr/bin
-        echo '#!/bin/sh' > work/rootfs/usr/bin/startx
-        echo 'exec xfce4-session' >> work/rootfs/usr/bin/startx
-        chmod +x work/rootfs/usr/bin/startx
-
+    # =========================
+    # User setup
+    # =========================
     - name: Create user
       run: |
-        echo "trixieuser:x:1000:1000:Trixie User:/home/trixieuser:/bin/sh" >> work/rootfs/etc/passwd
-        mkdir -p work/rootfs/home/trixieuser
-
-    - name: Init system
-      run: |
-        mkdir -p work/rootfs/etc/init.d
-        cat <<EOF > work/rootfs/etc/init.d/bootmsg
-        #!/bin/sh
-        echo "TrixieOs ProjectA tarafından yapıldı"
+        sudo chroot work/rootfs /bin/sh <<'EOF'
+        adduser -D trixieuser
+        echo "trixieuser:trixie" | chpasswd
+        addgroup trixieuser wheel
+        echo "%wheel ALL=(ALL) ALL" >> /etc/sudoers
         EOF
-        chmod +x work/rootfs/etc/init.d/bootmsg
 
-    - name: Create initramfs
+    # =========================
+    # TRX GUI App Store
+    # =========================
+    - name: Install TRX Store
       run: |
-        cd work/rootfs
-        find . | cpio -H newc -ov | gzip > ../../iso/boot/initramfs.gz
+        sudo mkdir -p work/rootfs/usr/lib/trx
+        sudo tee work/rootfs/usr/bin/trx-store <<'EOF'
+        #!/usr/bin/env python3
+        import gi, os, requests, tarfile, tempfile
+        gi.require_version("Gtk", "3.0")
+        from gi.repository import Gtk
 
-    - name: GRUB config
+        REPOS = [
+          "https://raw.githubusercontent.com/trixieos/trx-repo/main/index.json"
+        ]
+
+        class App(Gtk.Window):
+            def __init__(self):
+                super().__init__(title="TRX App Store")
+                self.set_default_size(500,400)
+                box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+                self.add(box)
+                self.list = Gtk.ListBox()
+                box.pack_start(self.list, True, True, 0)
+                self.load()
+
+            def load(self):
+                for r in REPOS:
+                    try:
+                        data = requests.get(r, timeout=5).json()
+                        for a in data.get("apps",[]):
+                            b = Gtk.Button(label=f"{a['name']} ({a['size']})")
+                            b.connect("clicked", self.install, a["url"])
+                            self.list.add(b)
+                    except: pass
+                self.show_all()
+
+            def install(self, btn, url):
+                f = tempfile.mktemp()
+                r = requests.get(url)
+                open(f,"wb").write(r.content)
+                tarfile.open(f).extractall("/")
+                os.remove(f)
+
+        App().connect("destroy", Gtk.main_quit)
+        App().show_all()
+        Gtk.main()
+        EOF
+        sudo chmod +x work/rootfs/usr/bin/trx-store
+
+    # =========================
+    # Autostart XFCE
+    # =========================
+    - name: Autologin GUI
       run: |
-        cat <<EOF > iso/boot/grub/grub.cfg
-        set timeout=0
-        set default=0
+        sudo mkdir -p work/rootfs/etc/lightdm
+        sudo tee work/rootfs/etc/lightdm/lightdm.conf <<'EOF'
+        [Seat:*]
+        autologin-user=trixieuser
+        user-session=xfce
+        EOF
 
-        menuentry "TrixieOs" {
+    # =========================
+    # Init
+    # =========================
+    - name: Init script
+      run: |
+        sudo tee work/rootfs/init <<'EOF'
+        #!/bin/sh
+        mount -t proc none /proc
+        mount -t sysfs none /sys
+        mount -t devtmpfs none /dev
+        echo "TrixieOs ProjectA tarafından yapıldı"
+        exec /sbin/init
+        EOF
+        sudo chmod +x work/rootfs/init
+
+    # =========================
+    # SquashFS + ISO
+    # =========================
+    - name: Build ISO
+      run: |
+        sudo mksquashfs work/rootfs work/rootfs.squashfs -comp xz
+        mkdir -p iso/boot/grub
+        cp linux-6.6.8/arch/x86/boot/bzImage iso/boot/vmlinuz
+        cp work/rootfs.squashfs iso/boot/rootfs.squashfs
+
+        cat <<'EOF' > iso/boot/grub/grub.cfg
+        set timeout=3
+        menuentry "TrixieOs ProjectA tarafından yapıldı" {
           linux /boot/vmlinuz quiet
-          initrd /boot/initramfs.gz
+          initrd /boot/rootfs.squashfs
         }
         EOF
 
-    - name: Build ISO
-      run: |
         grub-mkrescue -o TrixieOs.iso iso
 
-    - name: Upload ISO
-      uses: actions/upload-artifact@v4
+    - uses: actions/upload-artifact@v4
       with:
-        name: TrixieOs
+        name: TrixieOs-ISO
         path: TrixieOs.iso
