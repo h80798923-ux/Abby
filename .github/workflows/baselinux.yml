@@ -1,0 +1,108 @@
+name: BaseLinux ISO Builder
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y build-essential bc bison flex libssl-dev libelf-dev \
+          libncurses-dev wget debootstrap squashfs-tools xorriso grub-pc-bin \
+          grub-common cpio rsync systemd-sysv
+
+      - name: Build BaseLinux ISO
+        run: |
+          set -e
+          KERNEL_VER=6.6.15
+          ISO_NAME=BaseLinux.iso
+          WORK=$HOME/baselinux
+          ROOTFS=$WORK/rootfs
+          ISO=$WORK/iso
+
+          sudo rm -rf $WORK
+          mkdir -p $WORK
+          cd $WORK
+
+          wget https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-$KERNEL_VER.tar.xz
+          tar -xf linux-$KERNEL_VER.tar.xz
+          cd linux-$KERNEL_VER
+
+          make defconfig
+          scripts/config --enable CONFIG_BLK_DEV_LOOP \
+                         --enable CONFIG_SQUASHFS \
+                         --enable CONFIG_OVERLAY_FS \
+                         --enable CONFIG_RD_GZIP \
+                         --enable CONFIG_BLK_DEV_RAM \
+                         --set-val CONFIG_BLK_DEV_RAM_SIZE 16384
+          make -j$(nproc)
+          make modules_install INSTALL_MOD_PATH=$ROOTFS
+          cd ..
+
+          sudo debootstrap stable $ROOTFS http://deb.debian.org/debian
+          sudo mount --bind /dev  $ROOTFS/dev
+          sudo mount -t proc proc $ROOTFS/proc
+          sudo mount -t sysfs sys $ROOTFS/sys
+
+          sudo chroot $ROOTFS /bin/bash << 'CHROOT'
+          apt update
+          apt install -y systemd-sysv sudo dbus live-boot initramfs-tools \
+          plasma-desktop sddm network-manager konsole dolphin firefox-esr
+          echo BaseLinux > /etc/hostname
+          echo root:root | chpasswd
+          useradd -m user
+          echo user:user | chpasswd
+          usermod -aG sudo user
+          systemctl enable sddm
+          systemctl enable NetworkManager
+          update-initramfs -c -k all
+          exit
+          CHROOT
+
+          sudo umount $ROOTFS/dev $ROOTFS/proc $ROOTFS/sys
+
+          mkdir -p $ISO/live
+          sudo mksquashfs $ROOTFS $ISO/live/filesystem.squashfs -e boot
+
+          mkdir -p $ISO/boot/grub
+          cp linux-$KERNEL_VER/arch/x86/boot/bzImage $ISO/boot/vmlinuz
+          cp $ROOTFS/boot/initrd.img-* $ISO/boot/initrd
+
+          cat << 'GRUBCFG' > $WORK/grub.cfg
+          set timeout=5
+          menuentry "BaseLinux Debian KDE Live" {
+            linux /boot/vmlinuz boot=live quiet splash
+            initrd /boot/initrd
+          }
+          GRUBCFG
+
+          grub-mkstandalone \
+            -O i386-pc \
+            -o $ISO/boot/grub/eltorito.img \
+            "boot/grub/grub.cfg=$WORK/grub.cfg"
+
+          xorriso -as mkisofs \
+            -o $ISO_NAME \
+            -iso-level 3 \
+            -full-iso9660-filenames \
+            -volid "BaseLinux" \
+            -b boot/grub/eltorito.img \
+            -no-emul-boot -boot-load-size 4 -boot-info-table \
+            $ISO
+
+          mv $ISO_NAME $GITHUB_WORKSPACE/
+
+      - name: Upload ISO
+        uses: actions/upload-artifact@v4
+        with:
+          name: BaseLinux-ISO
+          path: BaseLinux.iso
